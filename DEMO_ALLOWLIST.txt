@@ -1,0 +1,28 @@
+# Files allowed to ship in the public `demo/` folder of this repo.
+#
+# When the demo harness moves from D:\deck\rc\workers\rejectedcoins\assets\gzdoom-smoke\
+# into a `demo/` subdir of this repo, ONLY the entries below may be copied.
+# Everything else (commercial IWADs, non-redistributable mods, internal WADs)
+# must be excluded. Cross-check against this list before any `Copy-Item`.
+
+# === Allowed ===
+index.html              # demo harness
+freedm.wad              # FreeDM IWAD (BSD-licensed, freely redistributable)
+gzdoom.pk3              # GZDoom assets (GPL-3.0)
+brightmaps.pk3          # GZDoom brightmaps (GPL-3.0)
+game_support.pk3        # GZDoom game support (GPL-3.0)
+game_widescreen_gfx.pk3 # GZDoom widescreen graphics (GPL-3.0)
+lights.pk3              # GZDoom dynamic lights (GPL-3.0)
+
+# === Explicitly NOT allowed (paste-protect against accidental copy) ===
+# doom.wad               -> id Software commercial IWAD
+# doom2.wad              -> id Software commercial IWAD
+# brutal22test6.pk3      -> Sergeant_Mark_IV mod, non-commercial-only license
+# tomb.wad               -> internal RCOS map, not yet released
+# run-server.cmd         -> local dev convenience, not for public demo
+
+# === Build outputs (regenerated, not source) ===
+# gzdoom.js              -> built artifact, replaced per-build by staging step
+# gzdoom.wasm            -> built artifact, replaced per-build by staging step
+#   (these are listed as allowed in the recipe but are not sources — they get
+#    populated by the build pipeline, not checked into git)

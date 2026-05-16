@@ -1,0 +1,52 @@
+# --- engine source lives in a SEPARATE repo ---
+# A pinned fork of ZDoom/gzdoom @ g4.11.3 with our wasm patches is
+# expected to live at github.com/mungus43/gzdoom (or similar).
+# This repo (github.com/mungus43/tomb-engine) only carries the build
+# pipeline, demo harness, postmortem, and an inventory of the engine
+# patches — keeping engine sources out of this tree.
+gzdoom-src/
+
+# --- build outputs ---
+build/
+tools-build/
+build-log*.txt
+recon-log.txt
+probe.txt
+.ninja_*
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib
+*.wasm
+*.wasm.map
+
+# Allow committed wasm artifacts if/when we ship a release blob explicitly:
+!demo/gzdoom.wasm
+!demo/gzdoom.js
+
+# --- editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.history/
+
+# --- OS junk ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- backups / scratch ---
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# --- cowork / agent scratch ---
+.claude/
+.cowork/

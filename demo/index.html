@@ -1,0 +1,890 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GZDoom-wasm smoke test</title>
+<style>
+  html, body { margin: 0; background: #111; color: #ccc; font: 12px monospace; }
+  /* Dev surfaces (HUD, log) are hidden by default. Add `?dev=1` to the URL to
+     re-enable for testing. RCOS embeds the production view; dev never ships. */
+  #hud, #log { display: none; }
+  body.dev #hud, body.dev #log { display: block; }
+  /* Backbuffer is 320x200 (Doom's true native resolution). CSS upscales to
+     480x300 via nearest-neighbor 1.5x for chunky-pixel look. SBARINFO panel
+     positions assume 200-tall screen, so the backbuffer must match. */
+  #canvas { display: block; background: #000; image-rendering: pixelated; width: 480px !important; height: 300px !important; max-width: 480px; max-height: 300px; }
+
+  /* Game wrapper — single 480x360 box. RCOS embeds this. */
+  #game-wrap { position: relative; display: inline-block; width: 480px; height: 300px; margin: 0; }
+
+  /* State 1: picker modal — absolute overlay covering the entire canvas */
+  #picker-modal {
+    position: absolute; inset: 0;
+    background: rgba(10, 12, 16, 0.94);
+    color: #ddd;
+    font-family: system-ui, sans-serif;
+    display: flex; flex-direction: column; justify-content: center; align-items: center;
+    padding: 14px 18px; box-sizing: border-box; text-align: center;
+    z-index: 5;
+  }
+  #picker-modal[hidden] { display: none; }
+  #picker-modal h2 { margin: 0 0 4px; font-size: 16px; color: #fff; font-weight: 600; }
+  #picker-modal p { margin: 3px 0; color: #aaa; font-size: 11px; line-height: 1.4; }
+  #picker-modal p.small { font-size: 10px; color: #666; margin-top: 8px; }
+  #picker-modal .picker-buttons {
+    display: flex; flex-direction: column; gap: 6px;
+    margin: 10px 0 4px; width: 220px;
+  }
+  #picker-modal button, #picker-modal .upload-label {
+    background: #2a4; color: #fff; border: none;
+    padding: 8px 14px; border-radius: 3px;
+    font: 600 12px system-ui, sans-serif; cursor: pointer;
+    text-align: center; display: inline-block; line-height: 1.2;
+  }
+  #picker-modal button:hover { background: #3b5; }
+  #picker-modal .upload-label { background: #2a4a8a; }
+  #picker-modal .upload-label:hover { background: #3b6cb; }
+  #picker-status { min-height: 14px; margin-top: 6px; font-size: 10px; font-family: monospace; }
+  #picker-status.err { color: #f88; }
+  #picker-status.ok { color: #9f9; }
+  #picker-status.info { color: #ccc; }
+  #picker-gh-link { position: absolute; bottom: 6px; right: 8px; color: #779; font-size: 9px; text-decoration: none; }
+  #picker-gh-link:hover { color: #aaf; text-decoration: underline; }
+
+  /* State 2: timer overlay (top-right of canvas) */
+  #timer-overlay {
+    position: absolute; top: 4px; right: 4px;
+    background: rgba(0,0,0,0.78);
+    color: #6f6;
+    padding: 3px 6px; border: 1px solid #2a4; border-radius: 2px;
+    font: bold 10px monospace; line-height: 1.4;
+    pointer-events: none; z-index: 10;
+    text-align: right;
+  }
+  #timer-overlay[hidden] { display: none; }
+  #timer-text { font-weight: bold; }
+  #timer-hints { color: #aac; font-weight: normal; font-size: 9px; margin-top: 1px; }
+  #timer-overlay.warning { color: #fc6; border-color: #fa0; }
+  #timer-overlay.critical { color: #f88; border-color: #f44; }
+  #log { white-space: pre-wrap; padding: 8px; max-height: 30vh; overflow: auto; border-top: 1px solid #333; }
+  #hud { position: fixed; top: 4px; right: 4px; background: rgba(0,0,0,.85); padding: 6px 10px; font: 11px monospace; color: #6f6; border: 1px solid #444; line-height: 1.4; }
+  .ok { color: #9f9; }
+  .err { color: #f88; }
+  .warn { color: #fc6; }
+  .trace { color: #6cf; }
+  button { background: #222; color: #ddd; border: 1px solid #555; padding: 6px 12px; margin: 6px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <!-- Single 480x360 box. UIs are absolute-positioned over the canvas. -->
+  <div id="game-wrap">
+    <canvas id="canvas" width="320" height="200" tabindex="1"></canvas>
+
+    <!-- State 1: picker modal (overlays canvas) -->
+    <div id="picker-modal">
+      <h2>GZDoom in your browser</h2>
+      <p>WebAssembly port. Try the 5-minute FreeDM demo, or load your own WAD.</p>
+      <div class="picker-buttons">
+        <button id="play-freedm">▶ Play FreeDM</button>
+        <label class="upload-label">📁 Upload WAD/PK3
+          <input type="file" id="wad-file" accept=".wad,.pk3" hidden>
+        </label>
+      </div>
+      <div id="picker-status"></div>
+      <p class="small">5-min session · max 100MB · file stays on your machine</p>
+      <a id="picker-gh-link" href="https://github.com/mungus43/tomb-engine" target="_blank" rel="noopener">source on GitHub →</a>
+    </div>
+
+    <!-- State 2: timer overlay (shown after launch) -->
+    <div id="timer-overlay" hidden>
+      <div id="timer-text">DEMO RESET IN 10:00</div>
+      <div id="timer-hints">ESC: release mouse · F10: reset</div>
+    </div>
+
+    <!-- State 3: cooldown modal (shown after session is exhausted) -->
+    <div id="cooldown-modal" hidden>
+      <h2>Demo limit reached</h2>
+      <p>You've used your 10-minute demo session.</p>
+      <div id="cooldown-countdown">Try again in <span id="cooldown-time">10:00</span></div>
+      <p class="small">After the cooldown, you'll get a fresh 10-minute session.</p>
+      <a id="cd-gh-link" href="https://github.com/mungus43/tomb-engine" target="_blank" rel="noopener">source on GitHub →</a>
+    </div>
+  </div>
+  <div id="hud">FPS (est): --<br>draws/sec: --<br>tex: 0 (+0/s)<br>buf: 0 (+0/s)<br>fb: 0<br>prog: 0<br>log rows: 0<br>RAF: 0<br>getContext: 0<br>AudioCtx: 0<br>set_main_loop: 0<br>gl draws: 0<br>last RAF: --</div>
+  <div id="log"></div>
+
+<script>
+// ---- Dev-mode toggle ------------------------------------------------------
+// Default = production (clean canvas + picker modal only).
+// Add ?dev=1 (or any value) to the URL to reveal the dev HUD and log panel.
+if (new URLSearchParams(location.search).has('dev')) {
+  // body class is enough — CSS defaults #hud / #log to display:none and the
+  // .dev class flips them back to block.
+  document.addEventListener('DOMContentLoaded', () => document.body.classList.add('dev'), { once: true });
+  // If parse is already past DOMContentLoaded (cached script ordering), apply now.
+  if (document.body) document.body.classList.add('dev');
+}
+
+// ---- F-key lockout + reset hotkey (production-safe) -----------------------
+// Block GZDoom's settings/save-load shortcut keys — F1 (help), F2 (save),
+// F3 (load), F4 (sound options), F5 (display options), F6 (quicksave),
+// F7 (end game), F8 (messages), F9 (quickload), F10 (was Quit — REPURPOSED
+// as our session-reset hotkey), F11 (brightness), F12 (screenshot). All
+// blocked from reaching the engine. Movement, attack, weapon switch,
+// automap (Tab) untouched.
+//
+// Esc (main menu) and backtick (console) are intentionally allowed under the
+// 5-minute session model: timer keeps running regardless of in-game pause,
+// console is fine for cheats like god/noclip/idkfa. The session timer + CVar
+// lockdown + page-reload-as-reset are the containment.
+//
+// F10 is special: blocked from the engine AND triggers location.reload(). Gives
+// the player a keyboard escape hatch since the mouse is locked during play and
+// the "try another WAD" link in the timer overlay isn't reachable without
+// first pressing Esc to release pointer lock.
+//
+// Capture phase to beat SDL2's bubble-phase wasm listener.
+(function lockFKeys() {
+  const BLOCKED_CODES = new Set([
+    'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12',
+    'Escape',  // never reaches Doom; browser still releases pointer lock
+  ]);
+  const BLOCKED_KEYCODES = new Set([
+    112,113,114,115,116,117,118,119,120,121,122,123,  // F1-F12
+    27,                                                // Escape
+  ]);
+  // Track whether the mouse cursor is physically inside the canvas. Pointer-lock
+  // mode counts as "inside" since the cursor has no real position then. This is
+  // what gates Esc/backtick — focus-state was leaky because the canvas stays
+  // activeElement even after the cursor moves far away from it.
+  let _mouseOverCanvas = false;
+  function attachCanvasMouseTracker() {
+    const cv = document.getElementById('canvas');
+    if (!cv) { setTimeout(attachCanvasMouseTracker, 60); return; }
+    cv.addEventListener('mouseenter', () => { _mouseOverCanvas = true; });
+    cv.addEventListener('mouseleave', () => { _mouseOverCanvas = false; });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attachCanvasMouseTracker, { once: true });
+  } else {
+    attachCanvasMouseTracker();
+  }
+  function canvasIsEngaged() {
+    const cv = document.getElementById('canvas');
+    return _mouseOverCanvas || (cv && document.pointerLockElement === cv);
+  }
+  function gate(e) {
+    const isF10 = (e.code === 'F10' || e.keyCode === 121);
+    if (BLOCKED_CODES.has(e.code) || BLOCKED_KEYCODES.has(e.keyCode)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      // F10 on keydown is our reset hotkey — release pointer lock first
+      // (best-effort) then reload the page.
+      if (isF10 && e.type === 'keydown') {
+        try { document.exitPointerLock && document.exitPointerLock(); } catch (_) {}
+        location.reload();
+      }
+      return false;
+    }
+    // Backtick (console) is allowed, but ONLY when the mouse cursor is
+    // physically over the canvas (or pointer-locked to it). Otherwise the
+    // user is in the surrounding page chrome and the console keystroke
+    // would reach Doom via document-level SDL2 listeners.
+    const isTilde = e.code === 'Backquote' || e.keyCode === 192;
+    if (isTilde && !canvasIsEngaged()) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return false;
+    }
+  }
+  for (const t of ['keydown','keyup','keypress']) {
+    window.addEventListener(t, gate, true);
+    document.addEventListener(t, gate, true);
+  }
+})();
+
+// ---- Visibility-throttle bypass (TEST RIG ONLY) ---------------------------
+// Chrome throttles setTimeout(_, 0) and setInterval(_, <1s) to ~1Hz in
+// hidden tabs. The asyncify-driven engine yields via emscripten_sleep ->
+// setTimeout(0); under throttling, the loop effectively halts when the tab
+// is backgrounded — which makes headless/MCP-driven perf measurement
+// impossible.
+//
+// Workaround: route 0-delay setTimeouts through MessageChannel.postMessage,
+// which is NOT throttled. setInterval gets a self-scheduling polyfill that
+// uses the same channel.
+//
+// Production user tabs will be foregrounded and don't need this.
+(function installUnthrottle() {
+  const channel = new MessageChannel();
+  const queue = [];
+  channel.port1.onmessage = () => {
+    const fn = queue.shift();
+    if (fn && !fn.__cancelled) { try { fn(); } catch (e) { console.error(e); } }
+  };
+  const origST = window.setTimeout.bind(window);
+  const origCT = window.clearTimeout.bind(window);
+  const origSI = window.setInterval.bind(window);
+  const origCI = window.clearInterval.bind(window);
+  const stMap = new Map();
+  const siMap = new Map();
+  let nextId = 1;
+  // Only intercept delay=0 (the asyncify/JSPI yield path). Positive delays
+  // fall through to native setTimeout — polling for short delays burns enough
+  // CPU to slow the engine down even when the tab is visible.
+  window.setTimeout = function (fn, delay, ...args) {
+    delay = delay || 0;
+    if (delay > 0) return origST(fn, delay, ...args);
+    const id = nextId++;
+    const wrapped = () => { stMap.delete(id); fn(...args); };
+    stMap.set(id, wrapped);
+    queue.push(wrapped);
+    channel.port2.postMessage(0);
+    return -id;
+  };
+  window.clearTimeout = function (id) {
+    if (typeof id === 'number' && id < 0 && stMap.has(-id)) {
+      stMap.get(-id).__cancelled = true;
+      stMap.delete(-id);
+      return;
+    }
+    return origCT(id);
+  };
+  window.setInterval = function (fn, delay, ...args) {
+    delay = delay || 0;
+    if (delay >= 1000) return origSI(fn, delay, ...args);
+    const id = nextId++;
+    let live = true;
+    let lastTick = performance.now();
+    const tick = () => {
+      if (!live) return;
+      const now = performance.now();
+      if (now - lastTick >= delay) {
+        lastTick = now;
+        try { fn(...args); } catch (e) { console.error(e); }
+      }
+      window.setTimeout(tick, 0);
+    };
+    siMap.set(id, () => { live = false; });
+    window.setTimeout(tick, 0);
+    return -id;
+  };
+  window.clearInterval = function (id) {
+    if (typeof id === 'number' && id < 0 && siMap.has(-id)) {
+      siMap.get(-id)();
+      siMap.delete(-id);
+      return;
+    }
+    return origCI(id);
+  };
+})();
+
+// ---- Suppress native dialogs (TEST RIG ONLY) -----------------------------
+// I_FatalError under emscripten ends up calling window.alert(). Native dialogs
+// block the renderer thread (which makes CDP commands time out from headless
+// drivers and is invisible to anyone watching the page). Redirect to console
+// + the on-page log so the message is visible without blocking.
+(function muteNativeDialogs() {
+  const origAlert = window.alert.bind(window);
+  const origConfirm = window.confirm.bind(window);
+  const origPrompt = window.prompt.bind(window);
+  window.alert = function (msg) {
+    const text = String(msg);
+    console.error('[ALERT-INTERCEPT] ' + text);
+    try {
+      const el = document.getElementById('log');
+      if (el) {
+        const div = document.createElement('div');
+        div.className = 'err';
+        div.style.cssText = 'background: #400; color: #fdd; padding: 4px; border-left: 4px solid #f88; white-space: pre-wrap;';
+        div.textContent = '[ALERT] ' + text;
+        el.appendChild(div);
+        el.scrollTop = el.scrollHeight;
+      }
+    } catch (e) {}
+    // Also dump to a window global so MCP can pull it
+    window.__lastAlert = text;
+    window.__alertHistory = (window.__alertHistory || []);
+    window.__alertHistory.push({ t: Date.now(), text });
+  };
+  window.confirm = function (msg) {
+    console.warn('[CONFIRM-INTERCEPT] ' + msg + ' -> auto-cancel');
+    return false;  // don't proceed past anything that needs confirmation
+  };
+  window.prompt = function (msg, def) {
+    console.warn('[PROMPT-INTERCEPT] ' + msg + ' -> auto-empty');
+    return def || '';
+  };
+})();
+
+// ---- Canvas size pin (TEST RIG ONLY) -------------------------------------
+// Pin canvas BACKBUFFER to Doom's true native resolution — 320x200. CSS
+// upscales the displayed canvas to 480x300 (1.5x nearest-neighbor). 320x200
+// is what Doom's SBARINFO + menu coordinates were authored against, so the
+// status bar panel + menu math all line up. Without this pin, the GL3+
+// renderer's SDL resize path expands the canvas to the browser viewport,
+// tanking FPS via 20x fragment workload.
+const PIN_W = 320, PIN_H = 200;
+(function pinCanvasSize() {
+  const observe = () => {
+    const cv = document.getElementById('canvas');
+    if (!cv) { setTimeout(observe, 100); return; }
+    const desc = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width');
+    const descH = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'height');
+    Object.defineProperty(cv, 'width', {
+      configurable: true,
+      get() { return desc.get.call(this); },
+      set(v) {
+        if (v !== PIN_W) {
+          console.warn('[canvas-pin] clamping width=' + v + ' to ' + PIN_W);
+          return desc.set.call(this, PIN_W);
+        }
+        return desc.set.call(this, v);
+      }
+    });
+    Object.defineProperty(cv, 'height', {
+      configurable: true,
+      get() { return descH.get.call(this); },
+      set(v) {
+        if (v !== PIN_H) {
+          console.warn('[canvas-pin] clamping height=' + v + ' to ' + PIN_H);
+          return descH.set.call(this, PIN_H);
+        }
+        return descH.set.call(this, v);
+      }
+    });
+    // setAttribute path — also clamp
+    const origSA = cv.setAttribute.bind(cv);
+    cv.setAttribute = function(name, val) {
+      if (name === 'width') return origSA(name, String(PIN_W));
+      if (name === 'height') return origSA(name, String(PIN_H));
+      return origSA(name, val);
+    };
+    // Force pin
+    cv.width = PIN_W;
+    cv.height = PIN_H;
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', observe);
+  } else {
+    observe();
+  }
+})();
+
+const logEl = document.getElementById('log');
+const hudEl = document.getElementById('hud');
+const LOG_MAX_ROWS = 400;   // cap DOM growth — perf decay was masking real leaks
+function log(msg, cls='') {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  while (logEl.childElementCount > LOG_MAX_ROWS) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+// ---- Counters --------------------------------------------------------------
+let rafCount = 0, lastRafTs = 0;
+let getCtxCalls = 0;
+let audioCtxCalls = 0;
+let mainLoopSetCalls = 0;
+let glDrawCalls = 0;
+
+// FPS proxy: the engine doesn't go through window.requestAnimationFrame under
+// asyncify, so RAF stays at 0 even while the engine ticks. Instead we measure
+// gl_draws/sec — each frame has ~80–300 draw calls. We learn the per-frame
+// count empirically once gametic-trace messages start appearing.
+let prevDraws = 0;
+let prevSampleTs = 0;
+let drawsPerSec = 0;     // smoothed
+let drawsPerFrame = 0;   // learned empirically (see learnDrawsPerFrame below)
+
+// Track GL object growth so we can see leaks in real time.
+let prevTexN = 0, prevBufN = 0, prevTexTs = 0;
+let texPerSec = 0, bufPerSec = 0;
+
+function refreshHud() {
+  const now = performance.now();
+  if (prevSampleTs === 0) { prevSampleTs = now; prevDraws = glDrawCalls; prevTexTs = now; }
+  const dt = (now - prevSampleTs) / 1000;
+  if (dt >= 0.5) {
+    const inst = (glDrawCalls - prevDraws) / dt;
+    drawsPerSec = drawsPerSec ? (drawsPerSec * 0.6 + inst * 0.4) : inst;
+    prevDraws = glDrawCalls;
+    prevSampleTs = now;
+  }
+
+  // GL object counts (lightweight — Emscripten's GL table is just arrays).
+  let texN = 0, bufN = 0, fbN = 0, progN = 0;
+  if (window.GL) {
+    if (GL.textures)     for (const t of GL.textures)     if (t) texN++;
+    if (GL.buffers)      for (const b of GL.buffers)      if (b) bufN++;
+    if (GL.framebuffers) for (const f of GL.framebuffers) if (f) fbN++;
+    if (GL.programs)     for (const p of GL.programs)     if (p) progN++;
+  }
+  const dtTex = (now - prevTexTs) / 1000;
+  if (dtTex >= 1.0) {
+    texPerSec = texPerSec * 0.5 + ((texN - prevTexN) / dtTex) * 0.5;
+    bufPerSec = bufPerSec * 0.5 + ((bufN - prevBufN) / dtTex) * 0.5;
+    prevTexN = texN; prevBufN = bufN; prevTexTs = now;
+  }
+
+  // Real FPS: count `bindFramebuffer(null, ...)` calls — the engine binds the
+  // default framebuffer once per frame for the present pass.
+  if (typeof window.__fpsLastFrames === 'undefined') {
+    window.__fpsLastFrames = window.__frameCount || 0;
+    window.__fpsLastTs = now;
+    window.__fpsSmoothed = 0;
+  }
+  const dtFps = (now - window.__fpsLastTs) / 1000;
+  if (dtFps >= 0.5) {
+    const cur = window.__frameCount || 0;
+    const inst = (cur - window.__fpsLastFrames) / dtFps;
+    window.__fpsSmoothed = window.__fpsSmoothed
+      ? (window.__fpsSmoothed * 0.6 + inst * 0.4)
+      : inst;
+    window.__fpsLastFrames = cur;
+    window.__fpsLastTs = now;
+  }
+  const fpsEst = Math.round(window.__fpsSmoothed) + ' (real)';
+  const sinceRaf = lastRafTs ? Math.round(now - lastRafTs) + 'ms ago' : '--';
+  const sign = (x) => (x >= 0 ? '+' : '') + Math.round(x);
+  // AudioContext state(s) — comma-separated if there are multiple.
+  const acStates = (window.__allAudioCtxs || []).map(c => c.state).join(',') || '-';
+
+  hudEl.innerHTML =
+    'FPS (est): ' + fpsEst + '<br>' +
+    'draws/sec: ' + Math.round(drawsPerSec) + '<br>' +
+    'tex: ' + texN + ' (' + sign(texPerSec) + '/s)<br>' +
+    'buf: ' + bufN + ' (' + sign(bufPerSec) + '/s)<br>' +
+    'fb: ' + fbN + '<br>' +
+    'prog: ' + progN + '<br>' +
+    'log rows: ' + logEl.childElementCount + '<br>' +
+    'RAF: ' + rafCount + '<br>' +
+    'getContext: ' + getCtxCalls + '<br>' +
+    'AudioCtx: ' + audioCtxCalls + ' [' + acStates + ']<br>' +
+    'set_main_loop: ' + mainLoopSetCalls + '<br>' +
+    'gl draws: ' + glDrawCalls + '<br>' +
+    'last RAF: ' + sinceRaf;
+}
+setInterval(refreshHud, 250);
+
+// Learn draws-per-frame by listening for the engine's `D_DoomLoop iter#N` traces
+// that print on iters 1..5 and every 60th iter. We snapshot gl_draws at two
+// throttled boundaries and divide by the iter delta to get a true draws/frame.
+let firstIterDraws = null, firstIterN = null;
+function learnDrawsPerFrame(msg) {
+  const m = /D_DoomLoop iter\s*#?(\d+)/i.exec(msg);
+  if (!m) return;
+  const n = parseInt(m[1], 10);
+  if (firstIterN === null) { firstIterN = n; firstIterDraws = glDrawCalls; return; }
+  const dIter = n - firstIterN;
+  const dDraws = glDrawCalls - firstIterDraws;
+  if (dIter > 0 && dIter >= 60) {
+    drawsPerFrame = Math.round(dDraws / dIter);
+    log('[calib] draws/frame = ' + drawsPerFrame + ' (over ' + dIter + ' iters / ' + dDraws + ' draws)', 'ok');
+    firstIterN = n; firstIterDraws = glDrawCalls;  // re-arm
+  }
+}
+
+// ---- requestAnimationFrame counter ----------------------------------------
+const _origRAF = window.requestAnimationFrame.bind(window);
+window.requestAnimationFrame = (cb) => {
+  rafCount++;
+  const now = performance.now();
+  lastRafTs = now;
+  fps1s.push(now);
+  fps5s.push(now);
+  return _origRAF(cb);
+};
+
+// ---- Block fullscreen so canvas stays visible -----------------------------
+HTMLCanvasElement.prototype.requestFullscreen = function () {
+  log('[blocked] canvas.requestFullscreen()', 'warn');
+  return Promise.reject(new Error('blocked'));
+};
+HTMLElement.prototype.requestFullscreen = function () {
+  log('[blocked] element.requestFullscreen()', 'warn');
+  return Promise.reject(new Error('blocked'));
+};
+
+// ---- Watch every getContext call on the canvas ----------------------------
+// Per-program error tracking — populated by every wrapped draw call across
+// all GL contexts the engine creates. Inspect via window.__hk in the console.
+window.__hk = window.__hk || {
+  drawsByProg: {},
+  errsByProg: {},
+  methodCounts: {},
+  firstErrSamples: {},  // capture first 3 errors per program
+};
+const _origGetContext = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+  getCtxCalls++;
+  log('[getContext] type=' + type + ' attrs=' + JSON.stringify(attrs || {}), 'trace');
+  const ctx = _origGetContext.call(this, type, attrs);
+  if (ctx && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
+    // Wrap every draw method we know of + capture per-program error counts.
+    const wrapDraw = (name) => {
+      const orig = ctx[name];
+      if (typeof orig !== 'function') return;
+      ctx[name] = function (...a) {
+        glDrawCalls++;
+        window.__hk.methodCounts[name] = (window.__hk.methodCounts[name] || 0) + 1;
+        const r = orig.apply(ctx, a);
+        const err = ctx.getError();
+        // Find current program index in GL.programs
+        let progIdx = -1;
+        if (window.GL && GL.programs) {
+          const cp = ctx.getParameter(ctx.CURRENT_PROGRAM);
+          for (let i = 0; i < GL.programs.length; i++) if (GL.programs[i] === cp) { progIdx = i; break; }
+        }
+        window.__hk.drawsByProg[progIdx] = (window.__hk.drawsByProg[progIdx] || 0) + 1;
+        if (err !== 0) {
+          window.__hk.errsByProg[progIdx] = (window.__hk.errsByProg[progIdx] || 0) + 1;
+          // Capture first 3 errors per program for forensic inspection
+          const key = progIdx + ':' + err;
+          window.__hk.firstErrSamples[key] = window.__hk.firstErrSamples[key] || [];
+          if (window.__hk.firstErrSamples[key].length < 3) {
+            window.__hk.firstErrSamples[key].push({
+              method: name,
+              args_count: a.length,
+              vao: ctx.getParameter(ctx.VERTEX_ARRAY_BINDING),
+              fb: ctx.getParameter(ctx.FRAMEBUFFER_BINDING),
+              viewport: ctx.getParameter(ctx.VIEWPORT),
+            });
+          }
+        }
+        return r;
+      };
+    };
+    wrapDraw('drawElements');
+    wrapDraw('drawArrays');
+    wrapDraw('drawElementsInstanced');
+    wrapDraw('drawArraysInstanced');
+    wrapDraw('drawRangeElements');
+    // clear() doesn't draw geometry but wrap it to count GL work
+    const origClear = ctx.clear;
+    ctx.clear = function (...a) { glDrawCalls++; return origClear.apply(ctx, a); };
+    // Frame counter via bindFramebuffer(null) — the engine binds the default
+    // framebuffer once per frame for the present pass. This replaces the
+    // D_DoomLoop iter trace the HUD calibration used to read.
+    const origBindFB = ctx.bindFramebuffer;
+    ctx.bindFramebuffer = function (target, fb) {
+      if (fb === null) {
+        window.__frameCount = (window.__frameCount || 0) + 1;
+      }
+      return origBindFB.apply(ctx, arguments);
+    };
+    log('[getContext] returning ' + (ctx.constructor && ctx.constructor.name), 'trace');
+  }
+  return ctx;
+};
+
+// ---- AudioContext counter + state monitor --------------------------------
+const _origAC = window.AudioContext || window.webkitAudioContext;
+window.__allAudioCtxs = [];  // every AudioContext we've seen
+if (_origAC) {
+  const wrapped = function (...a) {
+    audioCtxCalls++;
+    log('[AudioContext] constructed', 'trace');
+    const ctx = new _origAC(...a);
+    window.__allAudioCtxs.push(ctx);
+    // Auto-resume if browser suspends it (focus loss, tab idle, etc.).
+    // Browser policy will only honor resume() if there's a recent user
+    // gesture; we still try and log either way.
+    ctx.addEventListener('statechange', () => {
+      log('[AudioContext] state -> ' + ctx.state, 'trace');
+      if (ctx.state === 'suspended') {
+        ctx.resume().then(
+          () => log('[AudioContext] auto-resumed OK', 'ok'),
+          (e) => log('[AudioContext] resume FAILED: ' + e.message, 'err')
+        );
+      }
+    });
+    return ctx;
+  };
+  window.AudioContext = wrapped;
+  window.webkitAudioContext = wrapped;
+}
+
+// ---- WAD validation (client-side) -----------------------------------------
+function readU32LE(b, off) {
+  return (b[off] | (b[off+1] << 8) | (b[off+2] << 16) | (b[off+3] << 24)) >>> 0;
+}
+function magic4(b) {
+  return String.fromCharCode(b[0], b[1], b[2], b[3]);
+}
+function validateUserWad(bytes) {
+  // PK3 = ZIP archive (PK\x03\x04). Trust by extension; ZIP structure is
+  // recursive enough that probing further client-side is fragile.
+  if (bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04) {
+    return { ok: true, kind: 'pk3' };
+  }
+  const m = magic4(bytes);
+  if (m === 'IWAD') {
+    return { error: "That's an IWAD (base-game file). Upload a custom mod/PWAD instead — the demo already provides FreeDM as the base." };
+  }
+  if (m !== 'PWAD') {
+    return { error: 'Unrecognized file format (expected WAD or PK3 archive).' };
+  }
+  // PWAD: walk lump directory and classify map naming.
+  const numLumps  = readU32LE(bytes, 4);
+  const dirOffset = readU32LE(bytes, 8);
+  if (dirOffset === 0 || numLumps === 0 || dirOffset + numLumps * 16 > bytes.length) {
+    return { error: 'WAD directory is malformed.' };
+  }
+  let hasDoom2Map = false, hasDoom1Map = false, totalMaps = 0;
+  for (let i = 0; i < numLumps; i++) {
+    const off = dirOffset + i * 16;
+    let name = '';
+    for (let k = 0; k < 8 && bytes[off + 8 + k] !== 0; k++) {
+      name += String.fromCharCode(bytes[off + 8 + k]);
+    }
+    name = name.trim().toUpperCase();
+    if (/^MAP[0-3]\d$/.test(name)) { hasDoom2Map = true; totalMaps++; }
+    if (/^E[1-4]M[1-9]$/.test(name)) { hasDoom1Map = true; totalMaps++; }
+  }
+  if (hasDoom1Map && !hasDoom2Map) {
+    return { error: 'This WAD is built for Doom 1 (uses E#M# map names). The demo only supports Doom 2-compatible WADs (MAP## maps) since FreeDM is the bundled IWAD.' };
+  }
+  return { ok: true, kind: 'pwad', maps: totalMaps };
+}
+
+// ---- 5-minute session timer (production safety) ----------------------------
+const SESSION_SECONDS = 5 * 60;
+let timerEnds = 0, timerInterval = 0;
+function startSessionTimer() {
+  timerEnds = Date.now() + SESSION_SECONDS * 1000;
+  const overlay = document.getElementById('timer-overlay');
+  const text    = document.getElementById('timer-text');
+  function tick() {
+    const left = Math.max(0, Math.ceil((timerEnds - Date.now()) / 1000));
+    const mm = Math.floor(left / 60);
+    const ss = (left % 60).toString().padStart(2, '0');
+    if (left <= 0) {
+      text.textContent = 'Demo time up — resetting…';
+      overlay.classList.add('critical');
+      clearInterval(timerInterval);
+      setTimeout(() => location.reload(), 1500);
+      return;
+    }
+    text.textContent = `DEMO RESET IN ${mm}:${ss}`;
+    if (left <= 30) overlay.classList.add('critical');
+    else if (left <= 60) overlay.classList.add('warning');
+  }
+  tick();
+  timerInterval = setInterval(tick, 500);
+}
+
+// ---- Picker UI -------------------------------------------------------------
+function setPickerStatus(msg, cls = 'info') {
+  const s = document.getElementById('picker-status');
+  s.textContent = msg;
+  s.className = cls;
+}
+document.getElementById('play-freedm').onclick = () => {
+  setPickerStatus('Loading FreeDM…', 'info');
+  goToGame(null, null);
+};
+document.getElementById('wad-file').onchange = async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const MB = 1024 * 1024;
+  if (file.size > 100 * MB) {
+    setPickerStatus(`File too large: ${(file.size / MB).toFixed(1)} MB. Limit is 100 MB.`, 'err');
+    e.target.value = '';
+    return;
+  }
+  setPickerStatus(`Reading ${file.name} (${(file.size / MB).toFixed(1)} MB)…`, 'info');
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const v = validateUserWad(bytes);
+    if (v.error) {
+      setPickerStatus(v.error, 'err');
+      e.target.value = '';
+      return;
+    }
+    setPickerStatus(`Loaded ${file.name} — booting GZDoom…`, 'ok');
+    goToGame(bytes, file.name);
+  } catch (err) {
+    setPickerStatus(`Read failed: ${err.message}`, 'err');
+  }
+};
+
+function goToGame(userBytes, userName) {
+  // Hide picker modal, show timer overlay. Canvas + game-wrap stay always
+  // present in layout — RCOS just embeds the single 480x360 box.
+  document.getElementById('picker-modal').hidden = true;
+  document.getElementById('timer-overlay').hidden = false;
+  startSessionTimer();
+  bootEngine(userBytes, userName);
+}
+
+// ---- WAD/PK3 fetch + engine boot -------------------------------------------
+async function fetchWad(name) {
+  log('Fetching ' + name);
+  const r = await fetch(name);
+  if (!r.ok) throw new Error(name + ': ' + r.status);
+  const buf = new Uint8Array(await r.arrayBuffer());
+  log('  ' + name + ' loaded (' + buf.length + ' bytes)', 'ok');
+  return buf;
+}
+
+// bootEngine(userBytes, userName) — loads the engine wasm and starts it.
+// If userBytes is non-null, it's a user-uploaded WAD/PK3, written to MEMFS and
+// passed to the engine via `-file <userName>` after FreeDM as IWAD.
+async function bootEngine(userBytes, userName) {
+  try {
+    const files = await Promise.all([
+      fetchWad('freedm.wad'),     // open-source IWAD for public launch
+      fetchWad('gzdoom.pk3'),
+      fetchWad('brightmaps.pk3'),
+      fetchWad('game_support.pk3'),
+      fetchWad('game_widescreen_gfx.pk3'),
+      fetchWad('lights.pk3'),
+    ]);
+    const [iwad, gzpk3, bmpk3, gspk3, wspk3, ltpk3] = files;
+
+    // Sanitize uploaded file name for MEMFS — strip path components, keep
+    // alphanumerics + a few extensions. Avoids weird write paths in MEMFS.
+    let safeUserName = null;
+    if (userBytes && userName) {
+      const stem = userName.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^_+/, '');
+      safeUserName = stem || 'user.wad';
+    }
+
+    const cv = document.getElementById('canvas');
+    // IMPORTANT: do NOT pre-create a WebGL context on the canvas. emscripten's
+    // EGL/SDL2 path calls getContext itself and registers the handle in its
+    // internal table. If the canvas already has a context, EGL gets back the
+    // existing one but has no handle for it -> silent hang on eglMakeCurrent.
+
+    // Build args dynamically — append `-file <userName>` if user uploaded one.
+    // Warp to MAP01 only if NO user file (otherwise let the engine pick the
+    // user-WAD's first map, which may be MAP01 / MAP02 / etc.).
+    const baseArgs = ['-iwad', 'freedm.wad'];
+    if (safeUserName) {
+      baseArgs.push('-file', safeUserName);
+    } else {
+      baseArgs.push('-warp', '01');
+    }
+
+    window.Module = {
+      arguments: [
+        ...baseArgs,
+
+        // ----- Renderer / display setup -----
+        '+vid_rendermode', '4',     // 4=Hardware (only mode our wasm port supports).
+        '+vid_preferbackend', '0',  // 0=GL3+ (phase 3 swap target). 1=GLES2 (legacy).
+        '+vid_fullscreen', '0',     // Never fullscreen in an embed.
+        '+vid_defwidth', '320',     // Backbuffer 320x200 (Doom's authentic native
+        '+vid_defheight', '200',    // resolution). CSS upscales to 480x300 via 1.5x
+                                    // nearest-neighbor — chunky-pixel classic look.
+                                    // SBARINFO panel positions are hardcoded for 200.
+        '+win_w', '320', '+win_h', '200',
+        '+vid_scalemode', '0',      // 0=normal. CSS handles upscale; engine stays native.
+        '+vid_vsync', '0',          // Browser RAF handles pacing; engine vsync conflicts.
+        '+cl_capfps', '0',          // Don't cap engine; browser RAF caps for us.
+
+        // Classic nearest-neighbor texture look (no bilinear smoothing).
+        // 0 = NEAREST, 4 = LINEAR_MIPMAP_LINEAR (default).
+        '+gl_texture_filter', '0',
+        '+gl_texture_filter_anisotropic', '1',  // disable anisotropy too
+
+        // ----- HUD / UI scale -----
+        // 320x240 backbuffer (authentic Doom 4:3). Force pixel-perfect 1x
+        // scaling for status bar and UI so the IWAD's SBARINFO panel renders
+        // at its native 320-wide size — anchored to the bottom 32px strip.
+        '+set', 'uiscale', '1',           // 1x = pixel-perfect UI
+        '+set', 'st_scale', '1',          // 1x status bar (auto-scale picks huge)
+        '+set', 'screenblocks', '10',     // fullscreen viewport + classic panel overlay
+        '+set', 'hud_althud', '0',        // classic Doom status bar, not modern alt-HUD
+
+        // ----- Music backend (vendored ZMusic 1.1.9) -----
+        // Bisect: trying 0 (MDEV_STANDARD) which on emscripten has no system
+        // MIDI and should return null fast. If engine still hangs at SetMusic,
+        // the bug is in ZMusic's general init path. If engine boots, the OPL/
+        // ADL device-specific init is the hang.
+        '+set', 'snd_mididevice', '0',
+        '+set', 'snd_musicvolume', '1.0',
+
+        // ----- Cheats enabled (player augmentation only — no settings access) -----
+        '+set', 'sv_cheats', '1',         // god/noclip/idkfa etc. work in console
+
+        // ----- LOCK the renderer/display + HUD knobs so users in the RCOS embed
+        // ----- can't accidentally tank their own experience. Once locked these
+        // ----- CVars reject both console `set` and menu changes via CVAR_NOSET.
+        // ----- One-way: there's no unlockcvar. To re-enable, reload the page.
+        '+lockcvar',
+          'vid_rendermode', 'vid_preferbackend', 'vid_fullscreen',
+          'vid_defwidth', 'vid_defheight', 'win_w', 'win_h',
+          'vid_scalemode', 'vid_vsync', 'cl_capfps',
+          'uiscale', 'st_scale', 'screenblocks', 'hud_althud',
+          'sv_cheats',  // locked ON — player can't disable cheats either, harmless
+      ],
+      canvas: cv,
+      preRun: [() => {
+        Module.FS.writeFile('/freedm.wad',              iwad);
+        Module.FS.writeFile('/gzdoom.pk3',              gzpk3);
+        Module.FS.writeFile('/brightmaps.pk3',          bmpk3);
+        Module.FS.writeFile('/game_support.pk3',        gspk3);
+        Module.FS.writeFile('/game_widescreen_gfx.pk3', wspk3);
+        Module.FS.writeFile('/lights.pk3',              ltpk3);
+        if (userBytes && safeUserName) {
+          Module.FS.writeFile('/' + safeUserName, userBytes);
+          log('Preloaded freedm.wad + 5 PK3s + user file ' + safeUserName + ' (' + userBytes.length + ' bytes)', 'ok');
+        } else {
+          log('Preloaded freedm.wad + 5 PK3s into MEMFS', 'ok');
+        }
+        Module.FS.chdir('/');
+      }],
+      onRuntimeInitialized: () => {
+        log('[Module] onRuntimeInitialized - wasm runtime ready', 'ok');
+        // Hook the C-export main-loop entry points. Each access is isolated
+        // because emscripten installs defensive getters on non-exported
+        // runtime helpers (e.g. `setMainLoop`) that THROW when read.
+        const m = Module;
+        for (const key of ['_emscripten_set_main_loop_arg',
+                           '_emscripten_set_main_loop']) {
+          try {
+            const fn = m[key];
+            if (typeof fn === 'function') {
+              m[key] = function (...a) {
+                mainLoopSetCalls++;
+                log('[hook] ' + key + ' called', 'ok');
+                return fn.apply(m, a);
+              };
+              log('[hook] wrapped Module.' + key, 'ok');
+            } else {
+              log('[hook] Module.' + key + ' = ' + typeof fn + ' (skipped)', 'warn');
+            }
+          } catch (e) {
+            log('[hook] Module.' + key + ' threw on access: ' + e.message, 'warn');
+          }
+        }
+      },
+      print:    (...a) => { const m = a.join(' '); learnDrawsPerFrame(m); log('[out] ' + m); },
+      printErr: (...a) => { const m = a.join(' '); learnDrawsPerFrame(m); log('[err] ' + m, 'err'); },
+      onAbort:  (reason) => log('[ABORT] ' + reason, 'err'),
+      locateFile: (f) => f + '?cb=' + Date.now(),
+      setStatus: (s) => { if (s) log('[status] ' + s); },
+    };
+
+    setTimeout(() => {
+      cv.focus();
+      log('[harness] auto-focused canvas (active=' + (document.activeElement === cv) + ')');
+    }, 500);
+
+    log('Loading gzdoom.js ...');
+    const s = document.createElement('script');
+    s.src = 'gzdoom.js?cb=' + Date.now();
+    s.onerror = (e) => log('[script-error] ' + e, 'err');
+    document.body.appendChild(s);
+  } catch (e) {
+    log('[fatal] ' + e.message, 'err');
+  }
+};
+</script>
+</body>
+</html>
