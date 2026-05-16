@@ -11,11 +11,7 @@ It plays MAP01 of FreeDM out of the box. It also loads heavy mods: Brutal Doom v
    doom2.wad     -                          ~95              sprite-heavy reference (Tier 2)
 ```
 
-Live demo: **[demo URL TBD]**
-
-![demo gif](docs/demo.gif)
-
-![screenshot — MAP01 Antechamber](docs/screenshot-freedm-map01.png)
+Live demo: **https://staging.rejectedcoins.com/gzdoom**
 
 ---
 
