@@ -343,6 +343,48 @@ The TEST_MATRIX.md file in this repo tracks the compatibility ladder. Highlights
 
 ---
 
+## Hosting / deployment
+
+The Python quick-start above "just works" because `python -m http.server`
+serves bytes raw. Production serving needs two things right, or `Play FreeDM`
+will hang silently or throw `SuspendError: trying to suspend JS frames`
+mid-init.
+
+### 1. Don't compress `.wasm` (or the WAD/PK3 files)
+
+Most CDNs and web servers auto-compress `application/wasm` with brotli/gzip.
+Emscripten's asyncify-driven streaming instantiation breaks on encoded
+responses in subtle ways — the picker shows, the click registers, then the
+engine throws `SuspendError` deep in the C++ exception path.
+
+- **Cloudflare**: set `Cache-Control: no-transform` on `/path/to/demo/*`
+  responses (Worker or Page Rule)
+- **nginx**: `gzip off;` inside the `demo/` location block, or exclude
+  `application/wasm` from `gzip_types`
+- **Caddy**: `encode` directive — exclude `*.wasm`, `*.wad`, `*.pk3`
+- **Apache**: `Header set Cache-Control "no-transform"` inside
+  `<FilesMatch "\.(wasm|wad|pk3)$">`
+
+### 2. COOP / COEP headers are NOT required
+
+The engine runs on Emscripten asyncify, not pthreads, so it does NOT use
+`SharedArrayBuffer`. You don't need `Cross-Origin-Opener-Policy` or
+`Cross-Origin-Embedder-Policy`. Setting them anyway works, but it's pointless
+complexity that breaks unrelated embeds. The original port plan called for
+pthreads — the implementation ended up asyncify; this note corrects the
+record.
+
+### 3. Cache-busting via `?cb=Date.now()`
+
+The smoke harness appends `?cb=<timestamp>` to every asset fetch. This
+intentionally bypasses every cache layer (browser, CDN, edge) so reloads
+always get fresh bytes — useful when iterating on builds, expensive at
+scale. If you put this in front of real traffic and want CDN caching to
+work, either strip the `?cb=` at your edge before the upstream fetch, or
+remove the `locateFile` override in `demo/index.html` (line ~870).
+
+---
+
 ## Status and roadmap
 
 **Working today (v1.0):**
