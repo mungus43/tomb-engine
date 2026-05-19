@@ -17,8 +17,14 @@ Line ranges are approximate — exact lines drift with surrounding edits.
 
 ## Renderer — GLES backend (`vid_preferbackend 1`)
 
-The non-default path. Kept in the tree as the fallback for browsers that
-don't have JSPI.
+**The shipping default path** (since 2026-05-19). A/B'd against GL3+
+under the worker harness on idle MAP01: GLES sustained 70 FPS (capped by
+`vid_maxfps`), GL3+ topped out at ~40 FPS. Per-draw cost is materially
+lower on GLES, presumably because WebGL2 drivers are GLES-shaped
+internally and the GLES path skips state-management abstraction the GL3+
+path adds. Earlier docs in this file claimed GL3+ was the shipping path
+on the theory that WebGL2 maps closer to GL 3.3 core; measurement
+contradicted that on this hardware.
 
 ### `src/common/rendering/gles/gles_system.cpp`
 - **L153–174** — In `InitGLES`, after VAO setup, call
@@ -65,11 +71,14 @@ don't have JSPI.
 
 ---
 
-## Renderer — GL3+ backend (`vid_preferbackend 0`, default)
+## Renderer — GL3+ backend (`vid_preferbackend 0`, fallback)
 
-The shipping path. WebGL2 maps onto OpenGL 3.3 core more cleanly than onto
-GLES 3.0; the GLES path accumulated too many GLES-vs-WebGL2 mismatches to
-be the right abstraction.
+The non-default path. Kept in the tree as a fallback / diagnostic
+(`?glb=gl3` in the smoke harness URL flips to it). The patches below
+are still required for GL3+ to *function* under WebGL2 — what changed
+in 2026-05-19 was the perf verdict, not the correctness work. WebGL2
+maps onto GL 3.3 core cleanly enough that this renderer works; it just
+costs more per draw than the GLES path on real browser drivers.
 
 ### `src/common/rendering/gl/gl_renderer.cpp`
 - **L85–145** — In `FGLRenderer::Initialize`, the same
