@@ -13,7 +13,7 @@ It plays MAP01 of FreeDM out of the box at any resolution from 320×200 up to 4K
 
 Engine ceiling is ~98 FPS on the dev box across the entire resolution range (320×200 through 3840×2160). It's 100% CPU-bound — BSP traversal, sprite sort, draw-call setup — so the backbuffer size is essentially free as far as perf goes. The GLES renderer backend turned out to be materially faster than the GL3+ backend under WebGL2 (see [Renderer backend choice](#renderer-backend-choice-gles-wins)).
 
-Live demo: **https://rejectedcoins.com/gzdoom-smoke/**
+Live demo: **https://staging.rejectedcoins.com/gzdoom-smoke/**
 
 ---
 
